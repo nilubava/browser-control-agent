@@ -16,7 +16,7 @@ a structured text map (numbered element list), wrapped in a ReAct-style
 ## Demo
 
 ### 1 · Weekend weather forecast
-*5 steps · fast · always works*
+*~5 steps · fast · always works*
 
 [![Watch weather forecast demo](https://cdn.loom.com/sessions/thumbnails/62bd98da682e4ac180faed1976dda3b5-with-play.gif)](https://www.loom.com/share/62bd98da682e4ac180faed1976dda3b5)
 
@@ -25,41 +25,60 @@ Francisco, and returns a structured summary with temperatures, conditions, and p
 
 ---
 
-### 2 · One-way flight search — no results under budget, reports closest match
-*~22 steps · complex SPA navigation*
+### 2 · Flight search — no qualifying flights, reports cheapest available
+*~12 steps · Kayak deep link, complex SPA navigation*
 
-[![Flight search part 1](https://cdn.loom.com/sessions/thumbnails/b2186fa2803d470797fa36cf670543ad-with-play.gif)](https://www.loom.com/share/b2186fa2803d470797fa36cf670543ad)
-[![Flight search part 2](https://cdn.loom.com/sessions/thumbnails/438e42c6a24146f5a3a69faabc417d47-with-play.gif)](https://www.loom.com/share/438e42c6a24146f5a3a69faabc417d47)
+[![Watch flight search - no matching flights demo](https://cdn.loom.com/sessions/thumbnails/bbcdad16cb504ea1832bbe720357e4fd-with-play.gif)](https://www.loom.com/share/bbcdad16cb504ea1832bbe720357e4fd)
 
-*(Split across two videos due to length.)*
+No qualifying flights under the budget exist for this route and date. Rather than giving up,
+the agent reports the **cheapest available option** with full details — airline, price, times,
+stops — so the user can make an informed decision. A useful near-miss beats a silent failure.
 
-No qualifying flights under $300 exist for this route and date. Rather than giving up, the
-agent reports the **cheapest available option** with full details — airline, price, times,
-stops — so the user can make an informed decision. This is the correct behaviour: a
-useful near-miss beats a silent failure.
-
-The agent also encountered Google Flights displaying prices in **AED** (the machine's local
-currency) and **autonomously converted to USD on the fly** — without being instructed to do
-so — before evaluating the $300 constraint.
-
-![Agent reasoning about AED→USD at step 22](screenshots/flight-currency-reasoning.png)
-
-> *"AED 1,132 ≈ $308 USD · AED 1,151 ≈ $313 USD — these are all above $300. Let me click
-> the cheapest flight to check if the actual USD price differs…"*
+The planner constructs a **Kayak deep link** with origin, destination, date, and sort order
+pre-encoded — the agent lands directly on a sorted results page rather than filling forms.
 
 ---
 
-### 3 · Graceful failure — restaurant does not exist in requested city
+### 3 · Flight search — successful, flight found under budget
+*~10 steps · verifies price constraint before calling done()*
+
+[![Watch successful flight check demo](https://cdn.loom.com/sessions/thumbnails/279b88fa8f0849f29edc4a2dfc8c2a72-with-play.gif)](https://www.loom.com/share/279b88fa8f0849f29edc4a2dfc8c2a72)
+
+A qualifying flight exists. The agent finds it, extracts airline, price, departure/arrival
+times, and stop count, then calls `done()`. The verifier confirms success criteria are met
+before the result is accepted.
+
+---
+
+### 4 · Graceful failure — restaurant does not exist in requested city
 *~8 steps · clear give_up with alternatives*
 
 [![Watch graceful failure demo](https://cdn.loom.com/sessions/thumbnails/cf6fa65701504e62b50ce789f99dd53c-with-play.gif)](https://www.loom.com/share/cf6fa65701504e62b50ce789f99dd53c)
 
 When asked to book at a restaurant that has no location in the requested city, the agent
-checks the restaurant's official website and 2–3 booking platforms, confirms no listing
-exists, then gives up with a clear explanation and concrete alternatives — rather than
-looping indefinitely across blocked and empty platforms.
+checks Resy, verifies the restaurant doesn't exist (via a quick existence check), then gives
+up with a clear explanation and concrete alternatives — rather than looping indefinitely
+across blocked and empty platforms.
 
 A confident *"this place doesn't exist in San Francisco"* is more useful than 40 wasted steps.
+
+---
+
+### 5 · Restaurant booking — ask_user clarification + successful booking
+*~15 steps · clarification gate, Resy deep link, form filling, pauses for guest details*
+
+[![Watch ask_user + restaurant booking demo](https://cdn.loom.com/sessions/thumbnails/2ffdda97807a4a2285340664376defb3-with-play.gif)](https://www.loom.com/share/2ffdda97807a4a2285340664376defb3)
+
+When the goal is underspecified — *"Book me a table for 2 tonight at 7pm in San Francisco"*
+with no restaurant name — the agent fires a **clarification gate before the browser even
+opens**. An amber reply box appears, the user types the restaurant name, and the planner
+**re-runs with the enriched goal** to generate a Resy deep link with date, party size, and
+restaurant name pre-encoded. The browser then opens directly on the results for the correct
+restaurant.
+
+The agent proceeds through the booking flow (selects time slot, fills in party size) and
+pauses again when it needs personal details to complete the reservation — name, email, phone —
+rather than fabricating or skipping them.
 
 ---
 
@@ -88,9 +107,9 @@ npm run dev    # → http://localhost:3000
 ```
 
 Type a command in the left panel. The right panel shows the live annotated browser
-screenshot, updating at every step. If the agent needs information from you (contact details
-for a booking, a CAPTCHA answer), an amber reply box appears above the input — type your
-answer and press Reply to resume.
+screenshot, updating at every step. If the agent needs information from you (which restaurant
+to book, contact details for a reservation, a CAPTCHA answer), an amber reply box appears
+above the input — type your answer and press Reply to resume.
 
 **CLI harness** (same agent core, no UI):
 
@@ -137,7 +156,7 @@ Click **`🔓 Add key`** in the top-right of the log panel.
 
 ## Test scenarios
 
-These scenarios cover the three primary use cases. Run them to exercise the full pipeline.
+These scenarios cover all five demo cases above. Run them to exercise the full pipeline.
 
 ### 1. Weekend weather forecast
 
@@ -152,55 +171,73 @@ temperatures and conditions for Saturday and Sunday.
 
 ---
 
-### 2. One-way flight search
+### 2. Flight search — no qualifying flights
 
 ```
 Search for one-way flights from SFO to JFK next Friday under $300
 ```
 
-**Expected:** The planner constructs a Kayak deep link with origin, destination, date, and
-price filter pre-encoded — the agent lands directly on a results page rather than filling
-forms. If no flights exist under the price limit, the agent reports the **cheapest available
-option** with full details rather than silently failing.
+**Expected:** The planner constructs a Kayak deep link (`kayak.com/flights/SFO-JFK/[date]?sort=price_a`)
+with all parameters pre-encoded. If no flights exist under the price limit, the agent reports
+the **cheapest available option** with full details rather than silently failing.
 
-[▶ Part 1](https://www.loom.com/share/b2186fa2803d470797fa36cf670543ad) · [▶ Part 2](https://www.loom.com/share/438e42c6a24146f5a3a69faabc417d47)
-
-> **Note on locale:** The agent autonomously handles currency mismatches — if Google Flights
-> shows prices in AED, it converts to USD on the fly before evaluating any price constraint.
-> The Kayak deep link avoids this entirely (always USD by default).
+[▶ Watch demo](https://www.loom.com/share/bbcdad16cb504ea1832bbe720357e4fd)
 
 ---
 
-### 3. Restaurant booking (with graceful failure)
+### 3. Flight search — successful
+
+```
+Search for one-way flights from SFO to LAX this weekend under $200
+```
+
+**Expected:** Finds a qualifying flight, extracts airline, price, and schedule, calls `done()`
+with a full summary. The verifier confirms the price constraint is satisfied before accepting
+the result.
+
+[▶ Watch demo](https://www.loom.com/share/279b88fa8f0849f29edc4a2dfc8c2a72)
+
+---
+
+### 4. Restaurant booking — restaurant does not exist in city
 
 ```
 Book me a table for 2 tonight at 7pm at Nobu in San Francisco
 ```
 
 **Expected (correct behaviour):** Nobu does not have a San Francisco location. The agent
-searches Resy and one fallback platform, confirms no listing, and gives up with a clear
-explanation:
+searches Resy, confirms no listing exists, and gives up with a clear explanation:
 
-> *"Nobu does not appear to have a San Francisco location. I checked Resy and OpenTable
-> (blocked) without finding a listing. The nearest Nobu locations are in Palo Alto and
-> Los Angeles. You can call the restaurant directly or try a different SF restaurant."*
+> *"Nobu does not appear to have a San Francisco location. I checked Resy without finding
+> a listing. The nearest Nobu locations are in Palo Alto and Los Angeles."*
 
-[▶ Watch graceful failure demo](https://www.loom.com/share/cf6fa65701504e62b50ce789f99dd53c)
+[▶ Watch demo](https://www.loom.com/share/cf6fa65701504e62b50ce789f99dd53c)
 
-To test the full booking flow with a restaurant that **does** exist, use:
+---
+
+### 5. Restaurant booking — underspecified goal triggers clarification, then books
 
 ```
-Book me a table for 2 tonight at 7pm at Che Fico in San Francisco
+Book me a table for 2 tonight at 7pm in San Francisco
 ```
 
-The agent will navigate Resy or Tock, select date/time/party size, and pause when it needs
-personal details:
+**Expected:** No restaurant name in the goal. The planner detects the missing info and fires a
+clarification gate **before the browser opens**. An amber reply box appears:
+
+> *"Which restaurant would you like to book?"*
+
+Type a restaurant name (e.g. `Nari`). The planner re-runs with the enriched goal and generates
+a Resy deep link with restaurant, date, and party size pre-filled. The agent navigates directly
+to results for that restaurant and proceeds with the booking flow, pausing again for personal
+details when it reaches the reservation form:
 
 > *"I've found availability. To complete the reservation I need your name, email, and phone number."*
 
-Reply in the amber box (e.g. `"Jane Smith, jane@example.com, 415-555-1234"`) and the loop
+Reply in the amber box (e.g. `Jane Smith, jane@example.com, 415-555-1234`) and the loop
 resumes. The agent fills the guest form and stops at the review screen — it does **not**
 click Confirm.
+
+[▶ Watch demo](https://www.loom.com/share/2ffdda97807a4a2285340664376defb3)
 
 ---
 
@@ -235,19 +272,46 @@ The model acts by referencing a number.
 ### The loop (`lib/agent.ts`)
 
 ```
-PLAN ─► [ OBSERVE ─► THINK ─► ACT ] × N ─► VERIFY ─► DONE
-              ▲___________________│
+PLAN ─► CLARIFY? ─► [ OBSERVE ─► THINK ─► ACT ] × N ─► VERIFY ─► DONE
+                          ▲___________________│
 ```
 
 | Stage | Detail |
 |---|---|
-| **Plan** | 1 Sonnet call. Resolves the goal into `start_url`, on-page `success_criteria`, `notes` (relative dates → absolute values), and `fallback_urls`. Forced structured output via `tool_choice`. |
+| **Plan** | 1 Sonnet call. Resolves the goal into `start_url`, on-page `success_criteria`, `notes` (relative dates → absolute values), `fallback_urls`, and optionally `clarification_needed`. Forced structured output via `tool_choice`. |
+| **Clarify** | If `clarification_needed` is set, the amber reply box appears **before the browser opens**. The user's answer is appended to the goal and the planner re-runs to generate the correct deep-link URL. Browser only launches after clarification is resolved. |
 | **Observe** | Perception pipeline + URL/title, open-dialog flag, console errors, last action result. Delivered as a `tool_result` so the model sees one coherent conversation thread. |
 | **Think** | 1 model call. Reasons briefly, then calls exactly one of 12 browser tools: `navigate` `click` `type` `select_option` `scroll` `key` `wait` `extract` `go_back` `ask_user` `done` `give_up`. |
 | **Act** | Playwright executes the tool call. Tiered recovery: direct attempt → short retry → longer retry for navigation timeouts → surface to model. |
 | **Verify** | Before any `done()` is accepted, a separate model call grounded in the screenshot **and** raw page text confirms success criteria are actually met. Premature `done()` calls are rejected and the loop continues. |
 
 ### Design decisions
+
+**Deep-link URL strategy.** The planner builds the deepest possible URL before the browser
+opens, encoding all known parameters directly:
+
+| Use case | Template |
+|---|---|
+| Flights | `kayak.com/flights/[IATA1]-[IATA2]/[YYYY-MM-DD]?sort=price_a` — always USD, pre-sorted cheapest |
+| Restaurant (Resy) | `resy.com/cities/[city-slug]/search?date=[YYYY-MM-DD]&seats=[N]&query=[Name]` |
+| Restaurant (Tock) | `exploretock.com/city/[slug]/search?city=...&latlng=[LAT],[LON]&date=...&time=...&party=N` — `latlng` required to override IP geolocation |
+| Weather | `weather.com/weather/tenday/l/[City]+[State]+United+States` |
+
+This eliminates most form-filling steps: the agent lands on a pre-filtered results page
+rather than navigating through multi-step wizards.
+
+**Clarification gate.** The planner has a structural `clarification_needed` field (not just a
+prompt instruction). When populated, a gate in `_runAgent` fires before `launchBrowser()` —
+the amber reply box appears, the user answers, and `planTask` re-runs with the enriched goal
+to regenerate the correct deep-link URL. This solves two problems: (1) prevents the agent
+from picking a random result when the goal is underspecified, and (2) avoids launching a
+browser that sits idle and goes stale during a 30+ second wait.
+
+**Restaurant existence check.** After Resy returns no results for a restaurant search, the
+agent checks whether the restaurant has any presence before trying fallback platforms. If it
+doesn't exist in the city, it gives up immediately with alternatives rather than cycling
+through 2–3 booking sites. Give up after 2 sources maximum even if the restaurant does exist
+on none of them.
 
 **Stuck detector.** Observations are hashed (URL + title + element values). Three consecutive
 unchanged hashes from *mutating* actions trigger graceful `give_up`. Read-only tools
@@ -270,14 +334,37 @@ all subsequent steps.
 
 **Cost-tiered models.** The main loop uses Sonnet (quality matters per step). The verifier
 uses Haiku (it's a simple yes/no grounded check — Haiku handles it at 4× lower cost per
-call).
+call). The planner stays on Sonnet — using Haiku here caused silent failures (empty `startUrl`,
+generic fallback criteria) that wasted many downstream steps.
 
 **Interactive `ask_user`.** Agent pauses, emits an event with a `requestId`, the UI shows an
 amber reply box, the answer POSTs to `/api/agent/reply`, an in-memory registry resolves the
-paused Promise, and the loop continues with the answer injected as a `tool_result`.
+paused Promise, and the loop continues with the answer injected as a `tool_result`. Used for
+two distinct cases: (1) up-front clarification (missing goal info, fires before browser
+launches) and (2) mid-task information requests (contact details, CAPTCHA answers, etc.).
 
 **Concurrency guard.** The browser is a module-level singleton. Concurrent `runAgent()`
 calls are serialized by an in-process Promise-chain mutex.
+
+**Cookie and consent banners.** `dismissOverlays()` runs automatically before every `observe()`
+call. It targets 11 specific consent-button selectors ("Accept all", "Accept cookies", "I agree",
+"Got it", "No thanks", etc.) and clicks the first visible match. The selector list is intentionally
+narrow — generic "OK"/"Close" buttons are excluded because they also close app-owned dropdowns and
+date pickers. The system prompt provides a fallback instruction for the model to handle any banner
+the heuristic misses.
+
+**A/B tested layouts.** The `data-agent-id` stamp is re-derived from scratch on every `observe()`:
+elements are identified by their accessibility role and name, not by CSS path or position. A layout
+change between A/B variants simply produces a different element list, which the model reads fresh the
+next turn — no special case needed. This also solves the deeper issue: on Google Flights, a naive
+`nth-of-type` CSS path resolves to 65 elements; the stamp guarantees uniqueness regardless of DOM structure.
+
+**Loading states and page transitions.** `waitForSettle()` fires after every navigation, click, key
+press, and go_back. It attempts `networkidle` (2 s timeout) and falls back to `domcontentloaded`
+gracefully — some sites keep long-poll XHR connections open indefinitely, which would cause
+`networkidle` to never resolve. Tier 3 of `executeWithRecovery()` adds a 2 s delay and a retry
+specifically for navigation timeouts. The system prompt additionally instructs the model to call
+`wait` and re-observe after form submissions before assuming the result has loaded.
 
 **Stale browser recovery.** `launchBrowser()` checks `browser.isConnected()` before reusing
 the existing page. If the window was closed manually or crashed between runs, it cleans up
@@ -291,7 +378,7 @@ app/
   api/agent/route.ts       NDJSON streaming endpoint — runs the agent loop
   api/agent/reply/route.ts Receives ask_user replies from the UI
 lib/
-  agent.ts                 The loop: plan, observe/think/act, verify, recovery, pruning
+  agent.ts                 The loop: plan, clarify, observe/think/act, verify, recovery, pruning
   browser.ts               Playwright wrapper + observe() perception pipeline
   tools.ts                 12 browser tool schemas (Anthropic format + Zod validation)
   ask-registry.ts          Pause/resume bridge for ask_user
@@ -310,8 +397,9 @@ scripts/
 | Scenario | Steps | Estimated cost |
 |---|---|---|
 | Weather lookup | ~5 | ~$0.05 |
-| Flight search | ~22 | ~$0.35–0.50 |
-| Restaurant (exists) | ~15 | ~$0.20–0.30 |
+| Flight search (no match, reports nearest) | ~12 | ~$0.20–0.30 |
+| Flight search (successful) | ~10 | ~$0.15–0.25 |
+| Restaurant (exists, with clarification + booking) | ~15 | ~$0.20–0.30 |
 | Restaurant (not found, gives up) | ~8 | ~$0.10 |
 
 ### Sonnet vs. Opus (main loop model)
@@ -323,21 +411,23 @@ The same flights scenario was run end-to-end on both:
 | SFO → JFK form filling | ✅ | ✅ identical element choices |
 | AED → USD autonomous recovery | ✅ constructed USD URL preserving flight params | ✅ derived the same fix independently |
 | Outcome | ✅ verified `done()` in 25 steps | Matched Opus step-for-step |
-| Estimated cost per run | ~$6–9 | ~$0.35–0.50 |
+| Estimated cost per run | ~$6–9 | ~$0.20–0.30 |
 
 **Finding:** Sonnet matched Opus on a genuinely complex SPA — including unscripted currency
-recovery — at ~15× lower cost. Opus is available as opt-in via `AGENT_MODEL=claude-opus-4-8`
+recovery — at ~20× lower cost. Opus is available as opt-in via `AGENT_MODEL=claude-opus-4-8`
 for tasks where Sonnet visibly struggles.
 
 ### Cost optimisations applied
 
 | Optimisation | Saving |
 |---|---|
-| `cache_control` on system prompt + tools | ~2500 tokens billed at cache-read rate (10×) cheaper from step 2 onward |
+| `cache_control` on system prompt + tools | ~3000 tokens billed at cache-read rate (10×) cheaper from step 2 onward |
 | Observation text pruning (strip element lists, keep headers) | Converts O(n²) history growth → O(n) |
 | Keep 1 screenshot in history (not 2) | Saves ~1365 tokens/step for all but the latest step |
-| Haiku for verifier | ~4× cheaper on the verification call vs. Sonnet |
+| Haiku for verifier (not planner) | ~4× cheaper on the verification call vs. Sonnet |
 | `max_tokens: 1000` for agent decisions | Tool calls are short; reduces output billing by ~33% |
+| Deep-link URL strategy | Eliminates 5–10 form-filling steps per run, reducing total step count |
+| Clarification gate before browser launch | Prevents stale-browser idle time and wasted navigation steps |
 
 ---
 
@@ -347,8 +437,8 @@ Deliberate scope decisions, not accidents:
 
 - **Bot-protected sites.** Cloudflare challenges on StreetEasy, Zillow, Apartments.com are
   detected immediately (title/URL pattern matching) and the agent navigates to a fallback
-  rather than wasting steps. Sites that load cleanly: Resy, Tock, Google Flights,
-  weather.com. No proxy rotation or fingerprint evasion — out of scope.
+  rather than wasting steps. Sites that load cleanly: Resy, Tock, Kayak, weather.com.
+  No proxy rotation or fingerprint evasion — out of scope.
 - **CAPTCHAs.** Detected and escalated to the user via `ask_user`. Not solved.
 - **Logins / credentials.** No credential storage. If a task requires login the agent asks
   via `ask_user` or gives up cleanly.
