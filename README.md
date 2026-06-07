@@ -86,6 +86,19 @@ rather than fabricating or skipping them.
 
 **Requirements:** Node 20+, an Anthropic API key.
 
+> **⚠️ You need an Anthropic API key to run this.**
+> Two ways to provide it — pick whichever is easier:
+>
+> **Option A — environment file (recommended):**
+> ```bash
+> cp .env.local.example .env.local
+> # Open .env.local and set ANTHROPIC_API_KEY=sk-ant-...
+> ```
+>
+> **Option B — paste it in the UI:**
+> Start the app (`npm run dev`), then click **`🔓 Add key`** in the top-right of the
+> log panel. The key is used only for that run and never stored server-side.
+
 ```bash
 # 1. Install dependencies
 npm install
@@ -93,18 +106,13 @@ npm install
 # 2. Install the Playwright Chromium build
 npm run playwright:install
 
-# 3. Add your API key
-cp .env.local.example .env.local
-# Edit .env.local and set ANTHROPIC_API_KEY=sk-ant-...
-```
+# 3. (See above) Add your Anthropic API key — via .env.local or the UI
 
-### Run — two ways
-
-**Web chat UI** (primary interface):
-
-```bash
+# 4. Start
 npm run dev    # → http://localhost:3000
 ```
+
+### How to use
 
 Type a command in the left panel. The right panel shows the live annotated browser
 screenshot, updating at every step. If the agent needs information from you (which restaurant
@@ -123,34 +131,12 @@ Screenshots from each step are written to `./screenshots/`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | **Required.** Or provide via UI (see below). |
+| `ANTHROPIC_API_KEY` | — | **Required.** Or provide via UI (see above). |
 | `BROWSER_HEADLESS` | `false` | Set `true` to hide the browser window. |
 | `AGENT_MAX_STEPS` | `40` | Loop budget before giving up. |
 | `AGENT_MODEL` | `claude-sonnet-4-6` | Main loop model — fires every step. |
 | `PLANNER_MODEL` | `claude-sonnet-4-6` | One upfront planning call. |
 | `VERIFIER_MODEL` | `claude-3-5-haiku-20241022` | Pre-`done()` verification — cheaper model, fires per attempt. |
-
-### API key — two ways to provide it
-
-**Option A — `.env.local` (recommended for local use)**
-
-```bash
-cp .env.local.example .env.local
-# Set ANTHROPIC_API_KEY=sk-ant-...
-```
-
-The key lives only on your machine, never leaves the server process.
-
-**Option B — UI key input (for shared / deployed use)**
-
-Click **`🔓 Add key`** in the top-right of the log panel.
-
-> ⚠️ **Security notice:**
-> - Stored in `localStorage` — readable by JS and browser extensions.
-> - Transmitted to the server over HTTPS on every run; visible in DevTools → Network.
-> - **Never persisted server-side** — discarded after each run.
-> - For a deployed app, set `ANTHROPIC_API_KEY` as a server env var instead.
-> - **Clear the key when done** using the Clear button in the key panel.
 
 ---
 
