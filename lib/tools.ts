@@ -246,6 +246,10 @@ export const ANTHROPIC_TOOLS: Tool[] = [
       },
       required: ["reason"],
     },
+    // Cache the entire tools array after the first step — it never changes mid-run.
+    // Anthropic caches everything up to and including the block marked ephemeral,
+    // so this one annotation on the last tool covers all 12 definitions (~2 500 tokens).
+    cache_control: { type: "ephemeral" } as const,
   },
 ];
 

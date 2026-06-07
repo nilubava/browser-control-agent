@@ -68,7 +68,16 @@ let _page: Page | null = null;
 const _consoleErrors: string[] = [];
 
 export async function launchBrowser(): Promise<Page> {
-  if (_page) return _page;
+  // Reuse only if the browser process is still alive.
+  // If the window was closed manually or crashed, isConnected() returns false
+  // and _page holds a stale reference — re-launch instead of erroring mid-run.
+  if (_page && _browser?.isConnected()) return _page;
+
+  // Clean up any stale references before re-launching.
+  _browser = null;
+  _context = null;
+  _page = null;
+  _consoleErrors.length = 0;
 
   const headless = process.env.BROWSER_HEADLESS === "true";
 
@@ -112,7 +121,8 @@ export async function launchBrowser(): Promise<Page> {
 }
 
 export async function closeBrowser(): Promise<void> {
-  await _browser?.close();
+  // Ignore errors — browser may have already been closed by the user or a crash.
+  await _browser?.close().catch(() => {});
   _browser = null;
   _context = null;
   _page = null;

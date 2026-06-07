@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
       try {
         const result = await runAgent({
           goal,
-          maxSteps: parseInt(process.env.AGENT_MAX_STEPS ?? "40", 10),
+          maxSteps: parseInt(process.env.AGENT_MAX_STEPS ?? "20", 10),
           onStep: send,
           onAskUser: () => waitForAnswer(requestId),
           apiKey,  // undefined = fall back to server env var

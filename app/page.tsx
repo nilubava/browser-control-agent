@@ -6,6 +6,11 @@
  * Layout:
  *  - Left panel:  header → goal bar → step log → reply box → input
  *  - Right panel: live annotated browser screenshot
+ *
+ * Responsive:
+ *  - Mobile  (<768px)   tab bar, one panel at a time, full-width
+ *  - Tablet  (768–1100) side-by-side, left panel 340px
+ *  - Desktop (>1100px)  side-by-side, left panel 500px
  */
 
 import { useState, useRef, useEffect, useCallback, FormEvent } from "react";
@@ -33,23 +38,16 @@ interface LogEntry {
 // ---------------------------------------------------------------------------
 
 const C = {
-  // Backgrounds
   base:       "#0c0e14",
   panel:      "#0f1117",
   surface:    "#13151e",
   surfaceHi:  "#181b26",
-
-  // Borders
   border:     "#1c1f2e",
   borderHi:   "#252836",
-
-  // Text
   textPrimary:   "#e4e7ed",
   textSecondary: "#7d8799",
   textMuted:     "#3d4456",
   textDim:       "#252836",
-
-  // Accents
   green:    "#4ade80",
   greenDim: "#166534",
   greenBg:  "#071811",
@@ -66,6 +64,21 @@ const C = {
 
 const FONT_SANS = `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
 const FONT_MONO = `"SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace`;
+
+// ---------------------------------------------------------------------------
+// Responsive hook
+// ---------------------------------------------------------------------------
+
+function useWindowWidth(): number {
+  const [width, setWidth] = useState(1200); // SSR-safe default → desktop layout
+  useEffect(() => {
+    function update() { setWidth(window.innerWidth); }
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return width;
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -89,8 +102,16 @@ export default function Home() {
   const [keyDraft, setKeyDraft]       = useState("");
 
   const [elapsed, setElapsed] = useState(0);
-  const timerRef              = useRef<ReturnType<typeof setInterval> | null>(null);
-  const logRef                = useRef<HTMLDivElement>(null);
+  const [mobileTab, setMobileTab]     = useState<"log" | "browser">("log");
+
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const logRef   = useRef<HTMLDivElement>(null);
+
+  // Breakpoints
+  const windowWidth    = useWindowWidth();
+  const isMobile       = windowWidth < 768;
+  const isTablet       = windowWidth >= 768 && windowWidth < 1100;
+  const leftPanelWidth = isTablet ? 340 : 500;
 
   useEffect(() => {
     const saved = localStorage.getItem("anthropic_api_key");
@@ -110,6 +131,11 @@ export default function Home() {
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [running]);
+
+  // Auto-switch to browser tab when screenshot arrives on mobile
+  useEffect(() => {
+    if (isMobile && screenshot) setMobileTab("browser");
+  }, [screenshot, isMobile]);
 
   function fmtElapsed(s: number) {
     const m = Math.floor(s / 60);
@@ -153,6 +179,7 @@ export default function Home() {
     setScreenshotStep(0);
     setActiveGoal(goal);
     setRunning(true);
+    if (isMobile) setMobileTab("log");
 
     addToLog({ type: "action", step: 0, message: goal });
 
@@ -170,9 +197,9 @@ export default function Home() {
         return;
       }
 
-      const reader = res.body.getReader();
+      const reader  = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
+      let buffer    = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -238,24 +265,87 @@ export default function Home() {
   const lastEntry     = log[log.length - 1]?.event;
   const terminalEntry = lastEntry?.type === "done" || lastEntry?.type === "give_up" ? lastEntry : null;
 
+  const px = isMobile ? 12 : 16; // horizontal padding scale
+
   // ── render ──────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: "flex", height: "100vh", overflow: "hidden",
-                  background: C.base, fontFamily: FONT_SANS }}>
+    <div style={{
+      display: "flex",
+      height: "100dvh",
+      overflow: "hidden",
+      background: C.base,
+      fontFamily: FONT_SANS,
+      flexDirection: isMobile ? "column" : "row",
+    }}>
+
+      {/* ── Mobile tab bar ───────────────────────────────────────────────── */}
+      {isMobile && (
+        <div style={{
+          display: "flex",
+          background: C.surface,
+          borderBottom: `1px solid ${C.border}`,
+          flexShrink: 0,
+        }}>
+          {(["log", "browser"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              style={{
+                flex: 1,
+                padding: "10px 8px",
+                background: mobileTab === tab ? C.surfaceHi : "transparent",
+                border: "none",
+                borderBottom: `2px solid ${mobileTab === tab ? C.green : "transparent"}`,
+                color: mobileTab === tab ? C.textPrimary : C.textSecondary,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.5,
+                cursor: "pointer",
+                fontFamily: FONT_SANS,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+              }}
+            >
+              {tab === "log" ? "AGENT LOG" : "BROWSER VIEW"}
+              {tab === "log" && running && (
+                <span style={{ width: 6, height: 6, borderRadius: "50%",
+                               background: C.amber, display: "inline-block" }} />
+              )}
+              {tab === "browser" && screenshot && (
+                <span style={{ width: 6, height: 6, borderRadius: "50%",
+                               background: C.green, display: "inline-block" }} />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── LEFT: Log panel ─────────────────────────────────────────────── */}
-      <div style={{ display: "flex", flexDirection: "column", width: 500,
-                    flexShrink: 0, borderRight: `1px solid ${C.border}`,
-                    background: C.panel }}>
+      <div style={{
+        display:       isMobile && mobileTab !== "log" ? "none" : "flex",
+        flexDirection: "column",
+        width:         isMobile ? "100%" : leftPanelWidth,
+        flex:          isMobile ? 1 : undefined,
+        flexShrink:    0,
+        borderRight:   isMobile ? "none" : `1px solid ${C.border}`,
+        background:    C.panel,
+        minWidth:      0,
+      }}>
 
         {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between",
-                      alignItems: "center", padding: "12px 16px",
-                      borderBottom: `1px solid ${C.border}`, background: C.surface,
-                      flexShrink: 0 }}>
+        <div style={{
+          display: "flex", justifyContent: "space-between",
+          alignItems: "center", padding: `12px ${px}px`,
+          borderBottom: `1px solid ${C.border}`, background: C.surface,
+          flexShrink: 0,
+        }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ color: C.textSecondary, fontSize: 11,
-                           fontWeight: 600, letterSpacing: 1 }}>AGENT LOG</span>
+            {!isMobile && (
+              <span style={{ color: C.textSecondary, fontSize: 11,
+                             fontWeight: 600, letterSpacing: 1 }}>AGENT LOG</span>
+            )}
             {running && (
               <span style={{ color: C.textMuted, fontSize: 11, fontFamily: FONT_MONO }}>
                 step {currentStep} · {fmtElapsed(elapsed)}
@@ -273,10 +363,12 @@ export default function Home() {
             )}
             <button
               onClick={() => { setShowKeyInput(v => !v); setKeyDraft(apiKey); }}
-              style={{ background: C.surfaceHi, border: `1px solid ${C.borderHi}`,
-                       color: apiKey ? C.green : C.textMuted, fontSize: 11,
-                       padding: "3px 10px", cursor: "pointer", borderRadius: 5,
-                       fontFamily: FONT_SANS, fontWeight: 500 }}
+              style={{
+                background: C.surfaceHi, border: `1px solid ${C.borderHi}`,
+                color: apiKey ? C.green : C.textMuted, fontSize: 11,
+                padding: "3px 10px", cursor: "pointer", borderRadius: 5,
+                fontFamily: FONT_SANS, fontWeight: 500,
+              }}
               title={apiKey ? "API key set — click to change" : "No API key — click to add"}>
               {apiKey ? "🔑 Key set" : "🔓 Add key"}
             </button>
@@ -285,10 +377,12 @@ export default function Home() {
 
         {/* Active goal bar */}
         {activeGoal && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8,
-                        padding: "8px 16px", borderBottom: `1px solid ${C.border}`,
-                        background: C.panel, flexShrink: 0,
-                        borderLeft: `3px solid ${C.green}` }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8,
+            padding: `8px ${px}px`, borderBottom: `1px solid ${C.border}`,
+            background: C.panel, flexShrink: 0,
+            borderLeft: `3px solid ${C.green}`,
+          }}>
             <span style={{ color: C.textMuted, fontSize: 10, fontWeight: 600,
                            letterSpacing: 1, flexShrink: 0 }}>GOAL</span>
             <span style={{ color: C.textSecondary, fontSize: 12, overflow: "hidden",
@@ -301,12 +395,15 @@ export default function Home() {
         {/* API key panel */}
         {showKeyInput && (
           <form onSubmit={saveKey}
-            style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`,
-                     background: C.panel, flexShrink: 0 }}>
-            {/* Warning callout */}
-            <div style={{ background: C.amberBg, border: `1px solid ${C.amberDim}`,
-                          borderRadius: 6, padding: "10px 12px",
-                          fontSize: 12, color: "#c8974a", lineHeight: 1.7 }}>
+            style={{
+              padding: `12px ${px}px`, borderBottom: `1px solid ${C.border}`,
+              background: C.panel, flexShrink: 0,
+            }}>
+            <div style={{
+              background: C.amberBg, border: `1px solid ${C.amberDim}`,
+              borderRadius: 6, padding: "10px 12px",
+              fontSize: 12, color: "#c8974a", lineHeight: 1.7,
+            }}>
               <div style={{ fontWeight: 700, marginBottom: 6, color: C.amber,
                             display: "flex", alignItems: "center", gap: 6 }}>
                 <span>⚠</span><span>Security notice</span>
@@ -316,9 +413,11 @@ export default function Home() {
                 <li><strong>Stored in browser localStorage</strong> — not encrypted; readable by JS and extensions.</li>
                 <li><strong>Sent to the server over HTTPS</strong> on every run. Visible in DevTools → Network tab.</li>
                 <li><strong>Never persisted server-side</strong> — discarded after each run.</li>
-                <li>For a deployed app, set <code style={{ background: "#2a1a00", border: `1px solid ${C.amberDim}`,
+                <li>For a deployed app, set <code style={{
+                    background: "#2a1a00", border: `1px solid ${C.amberDim}`,
                     borderRadius: 3, padding: "0 4px", fontFamily: FONT_MONO,
-                    fontSize: 11 }}>ANTHROPIC_API_KEY</code> as a server env var instead.</li>
+                    fontSize: 11,
+                  }}>ANTHROPIC_API_KEY</code> as a server env var instead.</li>
                 <li><strong>Clear the key when done testing</strong> using the button below.</li>
               </ul>
             </div>
@@ -329,9 +428,11 @@ export default function Home() {
                 onChange={e => setKeyDraft(e.target.value)}
                 placeholder="sk-ant-..."
                 autoFocus
-                style={{ flex: 1, background: C.surface, border: `1px solid ${C.borderHi}`,
-                         borderRadius: 5, padding: "7px 10px", color: C.textPrimary,
-                         fontSize: 12, fontFamily: FONT_MONO, outline: "none" }} />
+                style={{
+                  flex: 1, background: C.surface, border: `1px solid ${C.borderHi}`,
+                  borderRadius: 5, padding: "7px 10px", color: C.textPrimary,
+                  fontSize: 12, fontFamily: FONT_MONO, outline: "none",
+                }} />
               <button type="submit" style={amberBtn}>Save</button>
               {apiKey && (
                 <button type="button" onClick={clearKey}
@@ -345,7 +446,7 @@ export default function Home() {
         <div ref={logRef} style={{ flex: 1, overflowY: "auto" as const,
                                    padding: "12px 0 20px" }}>
           {log.length === 0 && (
-            <div style={{ padding: "32px 20px" }}>
+            <div style={{ padding: `32px ${px}px` }}>
               <div style={{ color: C.textSecondary, fontSize: 14,
                             fontWeight: 500, marginBottom: 20 }}>
                 Type a command to get started.
@@ -357,10 +458,12 @@ export default function Home() {
                   "Book me a table for 2 tonight at 7pm at Nobu in San Francisco",
                 ].map((ex, i) => (
                   <button key={i} onClick={() => setInput(ex)}
-                    style={{ background: C.surface, border: `1px solid ${C.border}`,
-                             borderRadius: 6, padding: "9px 12px", cursor: "pointer",
-                             color: C.textSecondary, fontSize: 12, textAlign: "left" as const,
-                             fontFamily: FONT_SANS, lineHeight: 1.4 }}>
+                    style={{
+                      background: C.surface, border: `1px solid ${C.border}`,
+                      borderRadius: 6, padding: "9px 12px", cursor: "pointer",
+                      color: C.textSecondary, fontSize: 12, textAlign: "left" as const,
+                      fontFamily: FONT_SANS, lineHeight: 1.4,
+                    }}>
                     <span style={{ color: C.textMuted, marginRight: 8 }}>→</span>
                     {ex}
                   </button>
@@ -370,32 +473,34 @@ export default function Home() {
           )}
 
           {log.map((entry, i) => (
-            <LogLine key={i} entry={entry} />
+            <LogLine key={i} entry={entry} px={px} />
           ))}
 
           {/* Result block */}
           {terminalEntry && (
-            <div style={{ margin: "16px 16px 4px",
-                          background: terminalEntry.type === "done" ? C.greenBg : C.redBg,
-                          border: `1px solid ${terminalEntry.type === "done" ? C.greenDim : C.redDim}`,
-                          borderRadius: 8, padding: "12px 14px" }}>
+            <div style={{
+              margin: `16px ${px}px 4px`,
+              background: terminalEntry.type === "done" ? C.greenBg : C.redBg,
+              border: `1px solid ${terminalEntry.type === "done" ? C.greenDim : C.redDim}`,
+              borderRadius: 8, padding: "12px 14px",
+            }}>
               <div style={{ display: "flex", justifyContent: "space-between",
                             alignItems: "center", marginBottom: 8 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
                                color: terminalEntry.type === "done" ? C.green : C.red }}>
                   {terminalEntry.type === "done" ? "✓ COMPLETED" : "✗ STOPPED"}
                 </span>
-                <button onClick={() => copySummary(terminalEntry.summary ?? terminalEntry.message)}
-                  style={{ background: C.surface, border: `1px solid ${C.borderHi}`,
-                           color: C.textMuted, fontSize: 11, padding: "3px 10px",
-                           cursor: "pointer", borderRadius: 4, fontFamily: FONT_SANS }}>
+                <button
+                  onClick={() => copySummary(terminalEntry.summary ?? terminalEntry.message)}
+                  style={{
+                    background: C.surface, border: `1px solid ${C.borderHi}`,
+                    color: C.textMuted, fontSize: 11, padding: "3px 10px",
+                    cursor: "pointer", borderRadius: 4, fontFamily: FONT_SANS,
+                  }}>
                   {copied ? "✓ copied" : "Copy"}
                 </button>
               </div>
-              <div style={{ fontSize: 13, color: C.textPrimary, whiteSpace: "pre-wrap",
-                            lineHeight: 1.75, fontFamily: FONT_SANS }}>
-                {terminalEntry.summary ?? terminalEntry.message}
-              </div>
+              <Markdown text={terminalEntry.summary ?? terminalEntry.message} />
             </div>
           )}
         </div>
@@ -403,7 +508,7 @@ export default function Home() {
         {/* Ask-user reply box */}
         {pending && (
           <div style={{ borderTop: `1px solid ${C.amberDim}`, background: C.amberBg,
-                        padding: "10px 16px", flexShrink: 0 }}>
+                        padding: `10px ${px}px`, flexShrink: 0 }}>
             <div style={{ fontSize: 12, color: C.amber, marginBottom: 8, fontWeight: 500 }}>
               ❓ {pending.question}
             </div>
@@ -413,9 +518,11 @@ export default function Home() {
                 onChange={e => setReply(e.target.value)}
                 placeholder="Type your answer…"
                 autoFocus
-                style={{ flex: 1, background: C.surface, border: `1px solid ${C.amberDim}`,
-                         borderRadius: 5, padding: "7px 10px", color: C.textPrimary,
-                         fontSize: 13, fontFamily: FONT_SANS, outline: "none" }} />
+                style={{
+                  flex: 1, background: C.surface, border: `1px solid ${C.amberDim}`,
+                  borderRadius: 5, padding: "7px 10px", color: C.textPrimary,
+                  fontSize: 13, fontFamily: FONT_SANS, outline: "none",
+                }} />
               <button type="submit" disabled={!reply.trim()} style={amberBtn}>Reply</button>
             </form>
           </div>
@@ -423,44 +530,63 @@ export default function Home() {
 
         {/* Main input */}
         <div style={{ borderTop: `1px solid ${C.border}`, background: C.surface,
-                      padding: "12px 16px", flexShrink: 0 }}>
+                      padding: `12px ${px}px`, flexShrink: 0 }}>
           <form onSubmit={handleSubmit}
-            style={{ display: "flex", gap: 8, alignItems: "center",
-                     background: C.surfaceHi, border: `1px solid ${C.borderHi}`,
-                     borderRadius: 8, padding: "4px 4px 4px 12px" }}>
+            style={{
+              display: "flex", gap: 8, alignItems: "center",
+              background: C.surfaceHi, border: `1px solid ${C.borderHi}`,
+              borderRadius: 8, padding: "4px 4px 4px 12px",
+            }}>
             <span style={{ color: C.green, fontWeight: 700, fontSize: 14,
                            fontFamily: FONT_MONO, flexShrink: 0 }}>$</span>
             <input
               value={input}
               onChange={e => setInput(e.target.value)}
-              placeholder="Book a table for 2 at Nobu SF tonight at 7pm…"
+              placeholder={isMobile ? "Give the agent a task…" : "Book a table for 2 at Nobu SF tonight at 7pm…"}
               disabled={running}
               autoFocus={!pending}
-              style={{ flex: 1, background: "transparent", border: "none",
-                       outline: "none", color: C.textPrimary, fontSize: 13,
-                       fontFamily: FONT_SANS, padding: "6px 0" }} />
-            <button type="submit" disabled={running || !input.trim()}
-              style={{ background: running || !input.trim() ? C.surface : C.greenBg,
-                       border: `1px solid ${running || !input.trim() ? C.border : C.greenDim}`,
-                       color: running || !input.trim() ? C.textMuted : C.green,
-                       fontFamily: FONT_SANS, fontWeight: 600, fontSize: 13,
-                       padding: "7px 16px", cursor: running || !input.trim() ? "not-allowed" : "pointer",
-                       borderRadius: 6, flexShrink: 0 }}>
-              {running ? "Running…" : "Run →"}
+              style={{
+                flex: 1, background: "transparent", border: "none",
+                outline: "none", color: C.textPrimary, fontSize: 13,
+                fontFamily: FONT_SANS, padding: "6px 0",
+                minWidth: 0,
+              }} />
+            <button
+              type="submit"
+              disabled={running || !input.trim()}
+              style={{
+                background:  running || !input.trim() ? C.surface  : C.greenBg,
+                border:     `1px solid ${running || !input.trim() ? C.border : C.greenDim}`,
+                color:       running || !input.trim() ? C.textMuted : C.green,
+                fontFamily:  FONT_SANS, fontWeight: 600, fontSize: 13,
+                padding:    `7px ${isMobile ? 10 : 16}px`,
+                cursor:      running || !input.trim() ? "not-allowed" : "pointer",
+                borderRadius: 6, flexShrink: 0,
+                whiteSpace: "nowrap" as const,
+              }}>
+              {running ? (isMobile ? "…" : "Running…") : "Run →"}
             </button>
           </form>
         </div>
       </div>
 
       {/* ── RIGHT: Screenshot panel ──────────────────────────────────────── */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column",
-                    overflow: "hidden", background: C.base }}>
+      <div style={{
+        display:       isMobile && mobileTab !== "browser" ? "none" : "flex",
+        flex:          1,
+        flexDirection: "column",
+        overflow:      "hidden",
+        background:    C.base,
+        minWidth:      0,
+      }}>
 
         {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between",
-                      alignItems: "center", padding: "12px 16px",
-                      borderBottom: `1px solid ${C.border}`, background: C.surface,
-                      flexShrink: 0 }}>
+        <div style={{
+          display: "flex", justifyContent: "space-between",
+          alignItems: "center", padding: `12px ${px}px`,
+          borderBottom: `1px solid ${C.border}`, background: C.surface,
+          flexShrink: 0,
+        }}>
           <span style={{ color: C.textSecondary, fontSize: 11,
                          fontWeight: 600, letterSpacing: 1 }}>BROWSER VIEW</span>
           {screenshotStep > 0 && (
@@ -474,21 +600,29 @@ export default function Home() {
           <img
             src={`data:image/png;base64,${screenshot}`}
             alt="Annotated browser screenshot with numbered element marks"
-            style={{ width: "100%", height: "calc(100% - 45px)",
-                     objectFit: "contain", objectPosition: "top center" }} />
+            style={{
+              width: "100%",
+              height: "calc(100% - 45px)",
+              objectFit: "contain",
+              objectPosition: "top center",
+            }}
+          />
         ) : (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column" as const,
-                        alignItems: "center", justifyContent: "center",
-                        gap: 12, padding: 40, textAlign: "center" as const }}>
-            <div style={{ width: 48, height: 48, borderRadius: 12,
-                          background: C.surface, border: `1px solid ${C.border}`,
-                          display: "flex", alignItems: "center",
-                          justifyContent: "center", fontSize: 22 }}>🌐</div>
+          <div style={{
+            flex: 1, display: "flex", flexDirection: "column" as const,
+            alignItems: "center", justifyContent: "center",
+            gap: 12, padding: 40, textAlign: "center" as const,
+          }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: 12,
+              background: C.surface, border: `1px solid ${C.border}`,
+              display: "flex", alignItems: "center",
+              justifyContent: "center", fontSize: 22,
+            }}>🌐</div>
             <div style={{ color: C.textSecondary, fontSize: 14, fontWeight: 500 }}>
               Browser view
             </div>
-            <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.8,
-                          maxWidth: 280 }}>
+            <div style={{ color: C.textMuted, fontSize: 12, lineHeight: 1.8, maxWidth: 280 }}>
               Once a task starts, the live browser screenshot appears here —
               updated at every step with numbered marks over each interactive element.
             </div>
@@ -501,16 +635,16 @@ export default function Home() {
 
 // Shared amber button style
 const amberBtn: React.CSSProperties = {
-  background: "#1a1200",
-  border: `1px solid ${C.amberDim}`,
-  color: C.amber,
-  fontFamily: FONT_SANS,
-  fontWeight: 600,
-  fontSize: 12,
-  padding: "7px 14px",
-  cursor: "pointer",
+  background:   "#1a1200",
+  border:       `1px solid ${C.amberDim}`,
+  color:        C.amber,
+  fontFamily:   FONT_SANS,
+  fontWeight:   600,
+  fontSize:     12,
+  padding:      "7px 14px",
+  cursor:       "pointer",
   borderRadius: 6,
-  flexShrink: 0,
+  flexShrink:   0,
 };
 
 // ---------------------------------------------------------------------------
@@ -518,49 +652,48 @@ const amberBtn: React.CSSProperties = {
 // ---------------------------------------------------------------------------
 
 const EVENT_COLORS: Record<StepEvent["type"], string> = {
-  plan:      C.purple,
-  observe:   C.blue,
-  action:    C.green,
-  ask_user:  C.amber,
-  done:      C.green,
-  give_up:   C.red,
-  error:     C.red,
+  plan:     C.purple,
+  observe:  C.blue,
+  action:   C.green,
+  ask_user: C.amber,
+  done:     C.green,
+  give_up:  C.red,
+  error:    C.red,
 };
 
 const EVENT_LABELS: Record<StepEvent["type"], string> = {
-  plan:      "PLAN",
-  observe:   "VIEW",
-  action:    "ACT",
-  ask_user:  "ASK",
-  done:      "DONE",
-  give_up:   "STOP",
-  error:     "ERR",
+  plan:     "PLAN",
+  observe:  "VIEW",
+  action:   "ACT",
+  ask_user: "ASK",
+  done:     "DONE",
+  give_up:  "STOP",
+  error:    "ERR",
 };
 
 const EVENT_ICONS: Record<StepEvent["type"], string> = {
-  plan:      "🧭",
-  observe:   "👁",
-  action:    "▶",
-  ask_user:  "❓",
-  done:      "✓",
-  give_up:   "✗",
-  error:     "⚠",
+  plan:     "🧭",
+  observe:  "👁",
+  action:   "▶",
+  ask_user: "❓",
+  done:     "✓",
+  give_up:  "✗",
+  error:    "⚠",
 };
 
-function LogLine({ entry }: { entry: LogEntry }) {
+function LogLine({ entry, px }: { entry: LogEntry; px: number }) {
   const { event } = entry;
 
-  // done/give_up rendered in result block — skip here
   if (event.type === "done" || event.type === "give_up") return null;
 
   const isObserve = event.type === "observe";
-  const color = EVENT_COLORS[event.type];
-  const label = EVENT_LABELS[event.type];
-  const icon  = EVENT_ICONS[event.type];
+  const color     = EVENT_COLORS[event.type];
+  const label     = EVENT_LABELS[event.type];
+  const icon      = EVENT_ICONS[event.type];
 
   return (
-    <div style={{ display: "flex", gap: 0, padding: "3px 16px",
-                  opacity: isObserve ? 0.45 : 1 }}>
+    <div style={{ display: "flex", gap: 0, padding: `3px ${px}px`,
+                  opacity: isObserve ? 0.65 : 1 }}>
       {/* Step badge */}
       <span style={{ color: C.textMuted, fontSize: 11, fontFamily: FONT_MONO,
                      flexShrink: 0, width: 28, paddingTop: 1 }}>
@@ -570,21 +703,175 @@ function LogLine({ entry }: { entry: LogEntry }) {
       {/* Type tag */}
       <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
                      color, flexShrink: 0, width: 38, paddingTop: 2,
-                     fontFamily: FONT_SANS, opacity: isObserve ? 0.6 : 1 }}>
+                     fontFamily: FONT_SANS, opacity: isObserve ? 0.75 : 1 }}>
         {label}
       </span>
 
       {/* Icon */}
-      <span style={{ fontSize: 11, flexShrink: 0, width: 18, paddingTop: 1 }}>
-        {icon}
-      </span>
+      <span style={{ fontSize: 11, flexShrink: 0, width: 18, paddingTop: 1 }}>{icon}</span>
 
       {/* Message */}
-      <span style={{ fontSize: 12, color: isObserve ? C.textMuted : C.textPrimary,
-                     lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" as const,
-                     fontFamily: event.type === "action" ? FONT_MONO : FONT_SANS }}>
+      <span style={{
+        fontSize: 12, color: isObserve ? C.textSecondary : C.textPrimary,
+        lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word" as const,
+        fontFamily: event.type === "action" ? FONT_MONO : FONT_SANS,
+        minWidth: 0,
+      }}>
         {event.message}
       </span>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Markdown renderer — no dependency, handles everything Claude puts in summaries
+// ---------------------------------------------------------------------------
+
+function parseTableRow(row: string): string[] {
+  return row.split("|").map((s) => s.trim()).filter(Boolean);
+}
+
+function renderInline(text: string): React.ReactNode {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**"))
+      return <strong key={i} style={{ fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("*") && part.endsWith("*"))
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    if (part.startsWith("`") && part.endsWith("`"))
+      return (
+        <code key={i} style={{
+          fontFamily: FONT_MONO, fontSize: "0.88em",
+          background: "rgba(255,255,255,0.07)", padding: "1px 5px", borderRadius: 3,
+        }}>{part.slice(1, -1)}</code>
+      );
+    return part;
+  });
+}
+
+function Markdown({ text }: { text: string }) {
+  const lines  = text.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // ── Table ─────────────────────────────────────────────────────────────
+    if (line.startsWith("|") && lines[i + 1]?.match(/^\|[-: |]+\|/)) {
+      const headers = parseTableRow(line);
+      i += 2; // skip separator row
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].startsWith("|")) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      nodes.push(
+        <div key={`tbl-${i}`} style={{ overflowX: "auto", margin: "8px 0" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
+            <thead>
+              <tr>
+                {headers.map((h, j) => (
+                  <th key={j} style={{
+                    padding: "4px 10px", borderBottom: `1px solid ${C.borderHi}`,
+                    textAlign: "left", color: C.textSecondary, fontWeight: 600,
+                    whiteSpace: "nowrap",
+                  }}>{renderInline(h)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => (
+                <tr key={ri}>
+                  {row.map((cell, ci) => (
+                    <td key={ci} style={{
+                      padding: "3px 10px", borderBottom: `1px solid ${C.border}`,
+                      color: C.textPrimary,
+                    }}>{renderInline(cell)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    // ── Headings ──────────────────────────────────────────────────────────
+    const h3 = line.match(/^### (.+)/);
+    if (h3) {
+      nodes.push(
+        <div key={i} style={{
+          fontWeight: 600, color: C.textPrimary, fontSize: 13,
+          marginTop: 12, marginBottom: 3, fontFamily: FONT_SANS,
+        }}>{renderInline(h3[1])}</div>
+      );
+      i++; continue;
+    }
+
+    const h2 = line.match(/^## (.+)/);
+    if (h2) {
+      nodes.push(
+        <div key={i} style={{
+          fontWeight: 700, color: C.textPrimary, fontSize: 14,
+          marginTop: 14, marginBottom: 4, fontFamily: FONT_SANS,
+        }}>{renderInline(h2[1])}</div>
+      );
+      i++; continue;
+    }
+
+    const h1 = line.match(/^# (.+)/);
+    if (h1) {
+      nodes.push(
+        <div key={i} style={{
+          fontWeight: 700, color: C.textPrimary, fontSize: 15,
+          marginTop: 16, marginBottom: 5, fontFamily: FONT_SANS,
+        }}>{renderInline(h1[1])}</div>
+      );
+      i++; continue;
+    }
+
+    // ── Horizontal rule ───────────────────────────────────────────────────
+    if (line.trim() === "---") {
+      nodes.push(
+        <hr key={i} style={{
+          border: "none", borderTop: `1px solid ${C.borderHi}`, margin: "8px 0",
+        }} />
+      );
+      i++; continue;
+    }
+
+    // ── List item ─────────────────────────────────────────────────────────
+    const li = line.match(/^[-*] (.+)/);
+    if (li) {
+      nodes.push(
+        <div key={i} style={{ display: "flex", gap: 8, marginBottom: 2 }}>
+          <span style={{ color: C.textMuted, flexShrink: 0, userSelect: "none" }}>•</span>
+          <span style={{ color: C.textPrimary, fontSize: 13, lineHeight: 1.65,
+                         fontFamily: FONT_SANS }}>
+            {renderInline(li[1])}
+          </span>
+        </div>
+      );
+      i++; continue;
+    }
+
+    // ── Blank line ────────────────────────────────────────────────────────
+    if (line.trim() === "") {
+      if (nodes.length > 0) nodes.push(<div key={i} style={{ height: 5 }} />);
+      i++; continue;
+    }
+
+    // ── Plain paragraph ───────────────────────────────────────────────────
+    nodes.push(
+      <div key={i} style={{ color: C.textPrimary, fontSize: 13, lineHeight: 1.7,
+                             fontFamily: FONT_SANS }}>
+        {renderInline(line)}
+      </div>
+    );
+    i++;
+  }
+
+  return <div style={{ fontFamily: FONT_SANS }}>{nodes}</div>;
 }

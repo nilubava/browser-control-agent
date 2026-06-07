@@ -51,9 +51,11 @@ import {
 // Models (overridable via env)
 // ---------------------------------------------------------------------------
 
-const AGENT_MODEL = process.env.AGENT_MODEL ?? "claude-sonnet-4-6";
-const PLANNER_MODEL = process.env.PLANNER_MODEL ?? "claude-sonnet-4-6";
-const VERIFIER_MODEL = process.env.VERIFIER_MODEL ?? "claude-sonnet-4-6";
+const AGENT_MODEL    = process.env.AGENT_MODEL    ?? "claude-sonnet-4-6";
+// Planner: one call at run start — keep on Sonnet for reliability (cost is negligible, ~$0.004/run).
+// Verifier: may fire multiple times and sends a screenshot each time — Haiku is 4× cheaper there.
+const PLANNER_MODEL  = process.env.PLANNER_MODEL  ?? "claude-sonnet-4-6";
+const VERIFIER_MODEL = process.env.VERIFIER_MODEL ?? "claude-3-5-haiku-20241022";
 
 // ---------------------------------------------------------------------------
 // Anthropic client (lazy — validates the key without crashing at import time)
@@ -150,7 +152,10 @@ interface Plan {
   startUrl: string;
   successCriteria: string;
   notes: string;
-  fallbackUrls: string[];   // alternative sites if the primary is blocked
+  fallbackUrls: string[];
+  /** Set by the planner when essential info is missing. The agent asks the user
+   *  this question before navigating anywhere. */
+  clarificationNeeded?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,11 +178,31 @@ Rules:
 - If a cookie/consent banner or modal blocks the page, dismiss it first (click its accept/close button, or press Escape).
 - After submitting a form or search, the page needs time. Use "wait", then re-observe before assuming the result loaded.
 - Call done() only when the goal is genuinely achieved AND visible on the page. Put every relevant detail in the summary (confirmation numbers, prices, times, addresses).
-- Call give_up() if you are truly blocked (CAPTCHA, login wall, repeated failures). A clear explanation of what failed is a useful outcome — better than looping or pretending success.
+- Call give_up() if you are truly blocked (CAPTCHA, login wall, repeated failures). A clear explanation of what failed is a valid and useful outcome — better than looping or pretending success.
+- If a site returns "Access Denied", 403, or any block page — abandon it immediately and move to the next source. Do NOT retry the same site with a different URL or query.
+- If a search on a site returns zero results for the specific business/item in the correct location, that site has no listing — move on immediately. Do NOT retry with different search terms or URLs on the same site.
+- If a specific business, restaurant, flight, or item cannot be found after checking 2–3 distinct sources, call give_up() immediately. Do NOT keep searching. "This restaurant does not appear to exist or is not bookable online" is a perfectly useful result — tell the user clearly and suggest what they could try manually.
+- For restaurant bookings: navigate directly to the Resy search URL with the restaurant name, date, and party size as query params (e.g. resy.com/cities/san-francisco-ca/search?date=2026-06-07&seats=2&query=Che+Fico). If the restaurant appears in results, proceed with booking. If Resy returns no results: do ONE Google search (google.com/search?q=[Restaurant]+restaurant+[City]) to confirm whether the restaurant exists in that city at all. If Google confirms no location → give_up() immediately with a clear explanation. If Google confirms it exists but isn't on Resy → try Tock. Never try OpenTable — it blocks all automated access and is never useful.
+- For flight searches: prefer a deep-link URL that lands directly on results rather than filling in a search form from scratch. Kayak format: https://www.kayak.com/flights/[ORIGIN]-[DEST]/[YYYY-MM-DD]?sort=price_a — use this if the planner's start_url is just a homepage and you know all the parameters.
+- For flight/product searches with a price constraint: Kayak sorted by price is one authoritative source — do NOT cross-check the same route on Google Flights or other sites. If the sorted results clearly show the cheapest option, that is the answer. Read the prices, state whether any meet the budget, report the cheapest available, and call done(). Different sites price the same route identically; a second source adds steps without adding information.
 - Use ask_user() when you need information only the user can provide: CAPTCHAs, login credentials, personal contact details for bookings (name, email, phone), payment info, or genuinely ambiguous requests. Ask in one message and be specific about exactly what you need.
+- For restaurant or hotel bookings where the specific business name is not stated, call ask_user() IMMEDIATELY — before navigating anywhere. Do NOT browse platforms and pick a restaurant on the user's behalf. Ask: "Which restaurant would you like to book?" and wait for the answer before proceeding. The user's choice of restaurant is not yours to make.
 - Be efficient with your step budget. Always terminate explicitly with done() or give_up().
 
-IMPORTANT: This is a demo. Do NOT complete real purchases or submit payment details. Stop at the confirmation/review screen and report what you found.`;
+IMPORTANT: This is a demo. Do NOT complete real purchases, reservations, or transactions.
+
+Two distinct checkout situations — handle them differently:
+
+1. FORM NOT YET FILLED (e.g. Tock checkout with empty First Name / Last Name / Email / Phone fields):
+   - Do NOT call done() here. The task is not complete yet.
+   - Call ask_user() to request the personal details: "To complete the reservation I need your First Name, Last Name, Email, and Phone Number."
+   - Once the user replies, fill in those fields.
+   - Stop BEFORE clicking the final "Confirm" / "Reserve Now" / "Complete" button.
+   - Then call done() with a full summary of what is shown on the review screen.
+
+2. FORM ALREADY COMPLETE or LOGIN-BASED (e.g. Resy modal that just shows booking details with a "Reserve Now" button — no unfilled fields):
+   - Call done() immediately. Report the full details visible (restaurant, date, time, party size, price, cancellation policy).
+   - Do NOT click the final confirm button under any circumstances.`;
 
 // Cache the static prefix (tools + system) so it is not re-billed every turn.
 const SYSTEM_BLOCKS: Anthropic.TextBlockParam[] = [
@@ -221,6 +246,16 @@ const PLAN_TOOL: Anthropic.Tool = {
           "1–2 alternative URLs to try if the primary site is blocked or inaccessible. " +
           "e.g. if start_url is resy.com, fallback might be [opentable.com, exploretock.com].",
       },
+      clarification_needed: {
+        type: "string",
+        description:
+          "If essential information is missing from the goal (e.g. no restaurant name for a " +
+          "booking, no origin city for a flight), set this to the exact question to ask the user " +
+          "BEFORE any navigation. The agent will pause, show this question to the user, wait for " +
+          "their answer, and then proceed. Leave empty or omit if the goal has all needed info. " +
+          "Examples: 'Which restaurant would you like to book?' or " +
+          "'Which city are you flying from, and what date?'",
+      },
     },
     required: ["start_url", "success_criteria", "notes", "fallback_urls"],
   },
@@ -263,17 +298,51 @@ async function _runAgent(options: AgentOptions): Promise<AgentResult> {
   const client = getClient(apiKey);
 
   // ── 1. PLAN ───────────────────────────────────────────────────────────────
-  const plan = await planTask(client, goal, options.successCriteria);
+  let plan = await planTask(client, goal, options.successCriteria);
+  const plannerFellBack = !plan.startUrl;
   emit({
-    type: "plan",
+    type: plannerFellBack ? "error" : "plan",
     step: 0,
-    message: `Plan: start at ${plan.startUrl}\n  Success = ${plan.successCriteria}\n  Notes = ${plan.notes}`,
+    message: plannerFellBack
+      ? `Planner failed — using defaults. Agent will determine the start URL.\n  Criteria: ${plan.successCriteria}`
+      : `Start: ${plan.startUrl}\n  Success: ${plan.successCriteria}\n  Notes: ${plan.notes}`,
   });
 
+  // ── CLARIFICATION GATE ────────────────────────────────────────────────────
+  // Ask BEFORE launching the browser — no point opening Chrome while waiting
+  // for the user to type. After getting the answer, re-plan so the planner
+  // can build a proper deep-link URL that includes the user's answer
+  // (e.g. resy.com/.../search?query=Nari rather than the generic city page).
+  if (plan.clarificationNeeded) {
+    emit({ type: "ask_user", step: 0, message: plan.clarificationNeeded });
+    if (onAskUser) {
+      const answer = await onAskUser(plan.clarificationNeeded);
+      emit({ type: "action", step: 0, message: `↳ ${answer}` });
+
+      // Re-plan with the enriched goal so the planner generates the right URL.
+      const enrichedPlan = await planTask(
+        client,
+        `${goal}\nUser specified: ${answer}`,
+        options.successCriteria,
+      );
+      if (enrichedPlan.startUrl) {
+        plan = { ...enrichedPlan, clarificationNeeded: undefined };
+        emit({
+          type: "plan", step: 0,
+          message: `Plan updated: ${plan.startUrl}\n  Success: ${plan.successCriteria}\n  Notes: ${plan.notes}`,
+        });
+      }
+    } else {
+      // CLI harness — surface and stop.
+      return { success: false, summary: `Needs clarification: ${plan.clarificationNeeded}`, steps: 0 };
+    }
+  }
+
+  // Browser launch deferred until after clarification so the page is never
+  // left idle for 30+ seconds waiting for user input (stale page issue).
   await launchBrowser();
 
-  // Pre-navigate to the planned site to save a turn (best-effort; the model can
-  // still navigate elsewhere if this lands somewhere wrong).
+  // Pre-navigate to the planned site to save a turn.
   let feedback: string | null = null;
   if (plan.startUrl) {
     const nav = await navigate(plan.startUrl);
@@ -333,7 +402,8 @@ async function _runAgent(options: AgentOptions): Promise<AgentResult> {
     } else {
       messages.push({ role: "user", content: obsBlocks });
     }
-    pruneOldImages(messages);
+    pruneOldImages(messages, 1);          // keep only the most recent screenshot
+    pruneOldObservationText(messages, 3); // compress element lists older than 3 steps
 
     // ── 2. THINK (agent-model tool-use call) ─────────────────────────────────
     const decision = await decideNextAction(client, messages);
@@ -416,9 +486,23 @@ async function _runAgent(options: AgentOptions): Promise<AgentResult> {
     feedback = `Action ${result.ok ? "succeeded" : "FAILED"}: ${result.message}`;
   }
 
-  const summary = `Step budget (${maxSteps}) exhausted before the goal was confirmed complete.`;
-  emit({ type: "give_up", step: maxSteps, message: summary, summary });
-  return { success: false, summary, steps: maxSteps };
+  // Hard cut — the model never called done() or give_up() despite the warnings.
+  // Capture the last known page so the user can see where the agent got stuck.
+  let lastScreenshot: string | undefined;
+  let lastUrl = "";
+  try {
+    const finalObs = await observe(maxSteps, maxSteps, goal, plan.successCriteria, null);
+    lastScreenshot = finalObs.screenshotBase64;
+    lastUrl = finalObs.url;
+  } catch { /* ignore — browser may be closed */ }
+
+  const summary =
+    `Step budget (${maxSteps}) exhausted without completing the goal.` +
+    (lastUrl ? ` Last page: ${lastUrl}.` : "") +
+    ` The agent did not produce a final summary — try rephrasing the goal or breaking it into smaller steps.`;
+
+  emit({ type: "give_up", step: maxSteps, message: summary, summary, screenshotBase64: lastScreenshot });
+  return { success: false, summary, steps: maxSteps, finalScreenshotBase64: lastScreenshot };
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +525,7 @@ async function planTask(
   try {
     const resp = await client.messages.create({
       model: PLANNER_MODEL,
-      max_tokens: 512,
+      max_tokens: 1024,
       tools: [PLAN_TOOL],
       tool_choice: { type: "tool", name: "submit_plan" },
       messages: [
@@ -449,18 +533,86 @@ async function planTask(
           role: "user",
           content:
             `Today is ${dateStr}. The user's request: "${goal}".\n\n` +
-            `Pick the single best website to accomplish this. Then write success criteria describing ONLY ` +
-            `what should be visibly present on the page when the task is complete ` +
-            `(e.g. "a forecast showing temperatures and conditions for Saturday and Sunday is displayed"). ` +
-            `Keep criteria about on-page substance: do NOT include steps the agent performs ` +
-            `(like "summarized" or "reported to the user"), and do NOT hard-code exact calendar dates ` +
-            `if the site labels things by weekday or relative terms. ` +
-            `For numeric constraints (price/time limits), the goal is satisfied when QUALIFYING results ` +
-            `are VISIBLE among the listings (e.g. "flights at or under $300 appear in the results") — ` +
-            `do NOT require an explicit filter control to be applied, since the target may be reachable ` +
-            `just by sorting/searching and the filter UI may be a slider that is unreliable to operate. ` +
-            `Put resolved dates/times and key parameters (locations, party size, price limits) in the notes ` +
-            `for the agent's reference.`,
+
+            `STEP 1 — Check for missing essential information:\n` +
+            `Before anything else, identify whether the goal is missing information that only the user ` +
+            `can provide and that is REQUIRED to proceed. Examples:\n` +
+            `  • Restaurant booking with no restaurant name → clarification_needed = "Which restaurant would you like to book?"\n` +
+            `  • Flight search with no origin city → clarification_needed = "Which city are you flying from?"\n` +
+            `  • Hotel search with no destination → clarification_needed = "Which city do you need a hotel in?"\n` +
+            `If essential info is missing, set clarification_needed and still set a best-guess start_url ` +
+            `(the user's answer will be injected before the agent navigates). ` +
+            `If the goal has all needed information, leave clarification_needed empty.\n\n` +
+
+            `STEP 2 — Extract every parameter from the goal:\n` +
+            `Identify ALL relevant values before picking a URL: origin/destination cities or airports, ` +
+            `dates (resolve relative terms like "next Friday" or "tonight" to absolute YYYY-MM-DD values), ` +
+            `times, party/guest size, price limits, trip type (one-way/round-trip), cabin class, ` +
+            `cuisine type, dietary restrictions, duration, hotel star rating, etc. ` +
+            `Put ALL resolved parameters in the notes field so the agent always has them.\n\n` +
+
+            `STEP 3 — Build the deepest possible start_url using these templates:\n\n` +
+
+            `FLIGHTS (prefer Kayak — lands on results, always USD, no currency param needed):\n` +
+            `  One-way:    https://www.kayak.com/flights/[IATA1]-[IATA2]/[YYYY-MM-DD]?sort=price_a\n` +
+            `  Round-trip: https://www.kayak.com/flights/[IATA1]-[IATA2]/[YYYY-MM-DD]/[YYYY-MM-DD]?sort=price_a\n` +
+            `  + cabin class: append &cabin=economy OR &cabin=business OR &cabin=first OR &cabin=premium_economy\n` +
+            `  IMPORTANT — do NOT append &fs=price= for price constraints. Kayak returns "No results" when ` +
+            `  no flights match the filter instead of showing the cheapest available. Sort by price only ` +
+            `  (?sort=price_a) and let the agent read the results and evaluate the price constraint itself.\n` +
+            `  Fallback (if Kayak is blocked): https://www.kayak.com/flights/[IATA1]-[IATA2]/[YYYY-MM-DD]?sort=price_a ` +
+            `  on a direct navigate — same URL, no price filter. Do NOT fall back to Google Flights; ` +
+            `  its complex SPA requires many more steps and produces no new price information.\n\n` +
+
+            `RESTAURANTS / BUSINESS BOOKINGS:\n` +
+            `  Step 1 — Resy (preferred): https://resy.com/cities/[city-slug]/search?date=[YYYY-MM-DD]&seats=[N]&query=[Restaurant+Name]\n` +
+            `    Lands directly on search results for the restaurant with date and party size pre-filled.\n` +
+            `    City slug format: san-francisco-ca, nyc-ny, los-angeles-ca, chicago-il, miami-fl, boston-ma, etc.\n` +
+            `  Step 2 — If Resy shows no results, set fallback_url to a Google existence check:\n` +
+            `    https://www.google.com/search?q=[Restaurant+Name]+restaurant+[City]+[State]\n` +
+            `    If Google confirms no location in that city → agent gives up immediately.\n` +
+            `    If Google confirms it exists but not on Resy → agent tries Tock.\n` +
+            `  Step 3 — Tock (only if restaurant confirmed to exist):\n` +
+            `    https://www.exploretock.com/city/[city-slug]/search?city=[City+Name]&latlng=[LAT],[LON]&q=[Restaurant+Name]&date=[YYYY-MM-DD]&time=[HH:MM]&party=[N]\n` +
+            `    IMPORTANT: the latlng param is required — without it Tock overrides the city using IP geolocation\n` +
+            `    (e.g. a UAE IP defaults to Dubai/Berlin). Always include it.\n` +
+            `    City slugs and coordinates:\n` +
+            `      san-francisco  → 37.7749,-122.4194\n` +
+            `      nyc            → 40.7128,-74.0060\n` +
+            `      los-angeles    → 34.0522,-118.2437\n` +
+            `      chicago        → 41.8781,-87.6298\n` +
+            `      miami          → 25.7617,-80.1918\n` +
+            `      boston         → 42.3601,-71.0589\n` +
+            `      seattle        → 47.6062,-122.3321\n` +
+            `      austin         → 30.2672,-97.7431\n` +
+            `      london         → 51.5074,-0.1278\n` +
+            `      paris          → 48.8566,2.3522\n` +
+            `      dubai          → 25.2048,55.2708\n` +
+            `      tokyo          → 35.6762,139.6503\n` +
+            `  NEVER include OpenTable in fallback_urls — it blocks all automated search requests and wastes steps.\n\n` +
+
+            `WEATHER:\n` +
+            `  Google: https://www.google.com/search?q=weather+[city]+[state]+[timeframe]\n` +
+            `  weather.com: https://weather.com/weather/[today|tenday|weekend]/l/[City]+[State]\n\n` +
+
+            `HOTELS:\n` +
+            `  Booking.com: https://www.booking.com/searchresults.html?ss=[city]&checkin=[YYYY-MM-DD]&checkout=[YYYY-MM-DD]&group_adults=[N]\n` +
+            `  Google Hotels: https://www.google.com/travel/hotels?q=[city]+hotels&checkin=[YYYY-MM-DD]&checkout=[YYYY-MM-DD]&adults=[N]\n\n` +
+
+            `GENERAL RULE: encode every extracted parameter into the URL as a query param wherever the ` +
+            `template supports it. A URL that lands on results with all filters pre-applied saves 10–15 ` +
+            `agent steps compared to starting from a homepage and filling forms.\n\n` +
+
+            `STEP 4 — Write the success criteria:\n` +
+            `Describe ONLY what must be visibly present on the page when done ` +
+            `(e.g. "flights from SFO to JFK on June 13 are listed with prices in USD"). ` +
+            `Do NOT include steps the agent performs. Do NOT hard-code exact calendar dates if the ` +
+            `site labels things by weekday or relative terms. ` +
+            `For price-constrained searches (flights, hotels, products): write the criteria as ` +
+            `"results are visible sorted by price, and the agent has identified the cheapest option ` +
+            `and whether it meets the [budget] constraint" — NOT "a result under $X is visible". ` +
+            `The constraint may not be satisfiable; the agent should always be able to report the ` +
+            `cheapest available and call done() regardless of whether it meets the budget.`,
         },
       ],
     });
@@ -472,6 +624,7 @@ async function planTask(
         success_criteria: string;
         notes: string;
         fallback_urls?: string[];
+        clarification_needed?: string;
       };
       const fallbackUrls = input.fallback_urls ?? [];
       return {
@@ -482,6 +635,7 @@ async function planTask(
             ? `\nFALLBACK SITES (use if primary is blocked): ${fallbackUrls.join(", ")}`
             : ""),
         fallbackUrls,
+        clarificationNeeded: input.clarification_needed || undefined,
       };
     }
   } catch (err) {
@@ -517,7 +671,7 @@ async function decideNextAction(
 ): Promise<Decision> {
   const resp = await client.messages.create({
     model: AGENT_MODEL,
-    max_tokens: 1_500,
+    max_tokens: 1_000,   // was 1_500 — tool calls are short; output costs 5× input
     system: SYSTEM_BLOCKS,
     tools: ANTHROPIC_TOOLS,
     tool_choice: { type: "auto" },
@@ -682,6 +836,21 @@ function buildObservationBlocks(
   lines.push(`SUCCESS CRITERIA: ${plan.successCriteria}`);
   if (plan.notes) lines.push(`PLAN NOTES: ${plan.notes}`);
   if (feedback) lines.push(`\n${feedback}`);
+
+  // Budget warning — give the model a chance to wrap up gracefully rather than
+  // being hard-cut with no summary. Fires with increasing urgency as the limit approaches.
+  const stepsLeft = maxSteps - step;
+  if (stepsLeft <= 0) {
+    lines.push(`\n🚨 FINAL STEP: You MUST call done() or give_up() RIGHT NOW. ` +
+      `Do not take any other action. Summarize everything you have found so far.`);
+  } else if (stepsLeft === 1) {
+    lines.push(`\n🚨 LAST CHANCE — 1 step remaining. Call done() or give_up() immediately. ` +
+      `Summarize all findings collected so far. Do not navigate or click anything.`);
+  } else if (stepsLeft <= 3) {
+    lines.push(`\n⚠ BUDGET WARNING: Only ${stepsLeft} steps remaining. ` +
+      `Do not start any new navigation or multi-step actions. ` +
+      `Summarize what you have found and call done() or give_up() now.`);
+  }
   lines.push("");
   lines.push(`URL: ${obs.url}`);
   lines.push(`TITLE: ${obs.title || "(untitled)"}`);
@@ -751,6 +920,54 @@ function pruneOldImages(messages: Anthropic.MessageParam[], keep = 2): void {
   for (let i = 0; i < cutoff; i++) {
     const { arr, index } = holders[i];
     arr[index] = { type: "text", text: "[screenshot from an earlier step omitted to save context]" };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Context cost control — compress old observation text blocks
+// ---------------------------------------------------------------------------
+//
+// The element list (INTERACTIVE ELEMENTS) is the largest part of each
+// observation message and can run to 1 000+ tokens on complex pages. It is
+// only useful for the current step, not for historical context. This function
+// replaces element lists in turns older than `keep` with a one-line summary,
+// turning the O(n²) history growth into O(n).
+//
+function pruneOldObservationText(messages: Anthropic.MessageParam[], keep = 3): void {
+  const holders: Array<{ arr: unknown[]; index: number; text: string }> = [];
+
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (let i = 0; i < m.content.length; i++) {
+      const b = m.content[i] as { type: string; text?: string; content?: unknown[] };
+      // Direct text block (first turn before any tool_result wrapping)
+      if (b.type === "text" && b.text?.includes("INTERACTIVE ELEMENTS")) {
+        holders.push({ arr: m.content as unknown[], index: i, text: b.text });
+      }
+      // Nested inside a tool_result block (all subsequent turns)
+      if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (let j = 0; j < b.content.length; j++) {
+          const inner = b.content[j] as { type: string; text?: string };
+          if (inner.type === "text" && inner.text?.includes("INTERACTIVE ELEMENTS")) {
+            holders.push({ arr: b.content as unknown[], index: j, text: inner.text });
+          }
+        }
+      }
+    }
+  }
+
+  const cutoff = Math.max(0, holders.length - keep);
+  for (let i = 0; i < cutoff; i++) {
+    const { arr, index, text } = holders[i];
+    // Keep everything UP TO the element list — drop only the elements themselves.
+    // This preserves step / URL / title / feedback so the model remembers what it
+    // already tried (critical for avoiding re-visiting sites it already searched),
+    // while still cutting the 500–1 500 tokens that the element list costs.
+    const pruned = text.replace(
+      /\nINTERACTIVE ELEMENTS[\s\S]*$/,
+      "\n[Interactive elements pruned to save context]",
+    );
+    (arr as { type: string; text: string }[])[index] = { type: "text", text: pruned };
   }
 }
 
